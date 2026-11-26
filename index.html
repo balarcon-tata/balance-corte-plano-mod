@@ -8510,15 +8510,14 @@ document.getElementById('btnExportarWip').addEventListener('click', exportarExce
 
 /* ============================================================
    FLASH CUT · POSICIONES FIJAS SEMANALES
-   1 Operario de Flashcut + 2 posiciones variables.
+   1 Operario de Flashcut + 1 posición variable.
    Se mantienen fijas dentro de cada semana y son editables por semana.
    Forman parte del HC total, eficiencia proyectada, costo y HC óptimo.
    ============================================================ */
 const CORTEPLANOMOD_FLASH_FIXED_KEY = 'corteplanomod_flashcut_posiciones_fijas_v1';
 const CORTEPLANOMOD_FLASH_FIXED_DEF = [
   { key:'operario_flashcut', nombre:'Operario de Flashcut' },
-  { key:'variable_1', nombre:'Variable 1' },
-  { key:'variable_2', nombre:'Variable 2' }
+  { key:'variable_1', nombre:'Variable 1' }
 ];
 let CORTEPLANOMOD_FLASH_FIXED = (() => {
   try { return JSON.parse(localStorage.getItem(CORTEPLANOMOD_FLASH_FIXED_KEY) || '{}') || {}; }
@@ -9295,7 +9294,7 @@ const LINEAS_EXPANDIDAS_RESUMEN = new Set();
 const CORTEPLANOMOD_HC_OPT_KEY = 'corteplanomod_hc_optimo_manual_v1';
 let CORTEPLANOMOD_HC_OPT_MANUAL = (()=>{try{return JSON.parse(localStorage.getItem(CORTEPLANOMOD_HC_OPT_KEY)||'{}')||{}}catch(e){return {}}})();
 function claveOperacionLinea(linea,operacion){return `${normLinea(linea||'')}|||${norm(operacion||'')}`;}
-function operacionActivaEnLinea(linea,operacion){if(!operacion||/^SIN\s/.test(norm(operacion)))return true;return !OPERACIONES_INACTIVAS_POR_LINEA.has(claveOperacionLinea(lineaDeOperacion(linea,operacion),operacion));}
+function operacionActivaEnLinea(linea,operacion){if(!operacion || (/^SIN\s/.test(norm(operacion)) && norm(operacion) !== 'SIN OPERACION ACTIVA'))return true;return !OPERACIONES_INACTIVAS_POR_LINEA.has(claveOperacionLinea(lineaDeOperacion(linea,operacion),operacion));}
 function cortePlanoMODOptimo(iso, sugerido){const k=String(iso||'');const v=Number(CORTEPLANOMOD_HC_OPT_MANUAL[k]);return v>0?v:Number(sugerido||0);}
 function cortePlanoMODSetOptimo(iso,v){v=Number(v);if(v>0)CORTEPLANOMOD_HC_OPT_MANUAL[String(iso)]=v;else delete CORTEPLANOMOD_HC_OPT_MANUAL[String(iso)];localStorage.setItem(CORTEPLANOMOD_HC_OPT_KEY,JSON.stringify(CORTEPLANOMOD_HC_OPT_MANUAL));renderizarResumenVisualBalance();if(typeof ebScheduleSync==='function')ebScheduleSync('HC optimo',250);}
 function cortePlanoMODRecalcularOpsLinea(){cruzarDatos();if(wb.proyeccion)cruzarDatosProyeccion();aplicarFiltros();if(typeof ebScheduleSync==='function')ebScheduleSync('operacion por linea',250);}
