@@ -5340,7 +5340,7 @@ function cruzarDatos() {
         tuvoOperacionConEficiencia = true;
         hitEf++;
 
-        const horas = horasPorFecha(reg.fecha, reg.linea);
+        const horas = horasPorFecha(reg.fecha, reg.linea, opSam);
         if (horas === 0) return; // domingo: se mostrará como HC 0 si no queda operación útil
 
         const hc = calcularHC(samInfo.sam, reg.unidades, horas, eficiencia);
@@ -5434,7 +5434,7 @@ function cruzarDatosProyeccion() {
         if (typeof operacionActivaEnLinea === 'function' && !operacionActivaEnLinea(reg.linea, opSam)) return;
         const eficiencia = eficienciaDe(opSam, samInfo.etapa);
         tuvoOperacionConEficiencia = true;
-        const horas = horasPorFecha(reg.fecha, reg.linea);
+        const horas = horasPorFecha(reg.fecha, reg.linea, opSam);
         if (horas === 0) return;
         const hc = calcularHC(samInfo.sam, reg.unidades, horas, eficiencia);
         resultado.push({
@@ -5987,7 +5987,7 @@ function renderizarTarjetas() {
       // Para el resumen global usamos 44h: recalcular solo si no hay fecha
       const ef  = r.eficiencia / 100;
       const sam = r.sam;
-      hcTotal += calcularHC(sam, r.unidades, horasPorFecha(r.fecha, r.linea), ef);
+      hcTotal += calcularHC(sam, r.unidades, horasPorFecha(r.fecha, r.linea, r.operacion), ef);
     });
   } else {
     hcTotal = datos.reduce((s, r) => s + r.hc, 0);
@@ -6394,7 +6394,7 @@ function esLineaWebbing(linea) {
 
 function obtenerDesgloseHCChart(fechasBase) {
   const src = getEstadoActivo ? getEstadoActivo() : null;
-  const filasBase = src ? (src.resumenFilas || []).filter(f => !esLineaExcluida(f.linea)) : [];
+  const filasBase = filasPorModulo((src?.resumenFilas || []).filter(f => !esLineaExcluida(f.linea)));
   const desglose = {};
 
   fechasBase.forEach(iso => {
@@ -7403,7 +7403,7 @@ function recalcularConNuevasHoras() {
   const src = getEstadoActivo();
   if (!src.datosFinales || !src.datosFinales.length) return;
   src.datosFinales.forEach(r => {
-    const horas = horasPorFecha(r.fecha, r.linea);
+    const horas = horasPorFecha(r.fecha, r.linea, r.operacion);
     r.horas = horas;
     r.hc    = calcularHC(r.sam, r.unidades, horas, r.eficiencia / 100);
   });
@@ -8529,6 +8529,29 @@ function cortePlanoMODLineaEsFlashCut(linea) {
 }
 const FLASHCUT_HORAS_SEMANA = 12 * 5;
 
+const MODULO_DESVIRADO = 'Módulo de Desvirado';
+function lineaDeOperacion(linea, operacion) {
+  return /\bDESVIR(?:ADO|AR)\b/.test(norm(operacion || '')) ? MODULO_DESVIRADO : linea;
+}
+
+// La orden conserva sus unidades en la línea de origen. Solo se redistribuye la carga.
+function filasPorModulo(filas) {
+  const grupos = new Map();
+  for (const fila of filas) {
+    for (const [iso, dia] of Object.entries(fila.dias || {})) {
+      for (const op of dia.detalleOperaciones || []) {
+        const linea = lineaDeOperacion(fila.linea, op.operacion);
+        if (!grupos.has(linea)) grupos.set(linea, { linea, dias: {} });
+        const dias = grupos.get(linea).dias;
+        const destino = dias[iso] ||= { hcTotalDia: 0, detalleOperaciones: [] };
+        destino.detalleOperaciones.push(op);
+        destino.hcTotalDia += Number(op.hc || 0);
+      }
+    }
+  }
+  return [...grupos.values()];
+}
+
 function horasVariablesCorte(sem) {
   const filas = getEstadoActivo()?.resumenFilas || [];
   const iso = (getEstadoActivo()?.fechasColumnas || []).find(i => mod8SemanaDesdeIso(i) === sem) || mod8IsoSemana(sem);
@@ -8536,9 +8559,12 @@ function horasVariablesCorte(sem) {
   for (const fila of filas) {
     if (esLineaExcluida(fila.linea)) continue;
     const operaciones = fila.dias?.[iso]?.detalleOperaciones || [];
-    const hc = operaciones.reduce((total, op) => total + (operacionActivaEnLinea(fila.linea, op.operacion) ? Number(op.hc || 0) : 0), 0);
-    hcTotal += hc;
-    horasTotal += hc * horasPorFecha(iso, fila.linea);
+    for (const op of operaciones) {
+      if (!operacionActivaEnLinea(fila.linea, op.operacion)) continue;
+      const hc = Number(op.hc || 0);
+      hcTotal += hc;
+      horasTotal += hc * horasPorFecha(iso, fila.linea, op.operacion);
+    }
   }
   return hcTotal > 0 ? horasTotal / hcTotal : mod8Horas(sem);
 }
@@ -8659,7 +8685,8 @@ nombreDiaDesdeFecha = function(valor) {
   const sem = mod8SemanaDesdeIso(valor);
   return sem ? `SEMANA ${sem}` : '';
 };
-horasPorFecha = function(valor, linea) {
+horasPorFecha = function(valor, linea, operacion) {
+  if (lineaDeOperacion(linea, operacion) === MODULO_DESVIRADO) return 44;
   if (cortePlanoMODLineaEsFlashCut(linea)) return FLASHCUT_HORAS_SEMANA;
   const sem = mod8SemanaDesdeIso(valor);
   return sem ? mod8Horas(sem) : 44;
@@ -9102,7 +9129,7 @@ function mod8RecalcularConHoras() {
   [estado, estadoProyeccion].forEach(src => {
     if (!src || !src.datosFinales) return;
     src.datosFinales.forEach(r => {
-      const horas = horasPorFecha(r.fecha, r.linea);
+      const horas = horasPorFecha(r.fecha, r.linea, r.operacion);
       r.horas = horas;
       r.hc = calcularHC(r.sam, r.unidades, horas, r.eficiencia / 100);
     });
@@ -9268,7 +9295,7 @@ const LINEAS_EXPANDIDAS_RESUMEN = new Set();
 const CORTEPLANOMOD_HC_OPT_KEY = 'corteplanomod_hc_optimo_manual_v1';
 let CORTEPLANOMOD_HC_OPT_MANUAL = (()=>{try{return JSON.parse(localStorage.getItem(CORTEPLANOMOD_HC_OPT_KEY)||'{}')||{}}catch(e){return {}}})();
 function claveOperacionLinea(linea,operacion){return `${normLinea(linea||'')}|||${norm(operacion||'')}`;}
-function operacionActivaEnLinea(linea,operacion){if(!operacion||/^SIN\s/.test(norm(operacion)))return true;return !OPERACIONES_INACTIVAS_POR_LINEA.has(claveOperacionLinea(linea,operacion));}
+function operacionActivaEnLinea(linea,operacion){if(!operacion||/^SIN\s/.test(norm(operacion)))return true;return !OPERACIONES_INACTIVAS_POR_LINEA.has(claveOperacionLinea(lineaDeOperacion(linea,operacion),operacion));}
 function cortePlanoMODOptimo(iso, sugerido){const k=String(iso||'');const v=Number(CORTEPLANOMOD_HC_OPT_MANUAL[k]);return v>0?v:Number(sugerido||0);}
 function cortePlanoMODSetOptimo(iso,v){v=Number(v);if(v>0)CORTEPLANOMOD_HC_OPT_MANUAL[String(iso)]=v;else delete CORTEPLANOMOD_HC_OPT_MANUAL[String(iso)];localStorage.setItem(CORTEPLANOMOD_HC_OPT_KEY,JSON.stringify(CORTEPLANOMOD_HC_OPT_MANUAL));renderizarResumenVisualBalance();if(typeof ebScheduleSync==='function')ebScheduleSync('HC optimo',250);}
 function cortePlanoMODRecalcularOpsLinea(){cruzarDatos();if(wb.proyeccion)cruzarDatosProyeccion();aplicarFiltros();if(typeof ebScheduleSync==='function')ebScheduleSync('operacion por linea',250);}
@@ -9281,7 +9308,7 @@ renderizarResumenVisualBalance = function() {
   const src=getEstadoActivo(),filasBase=(src.resumenFilas||[]).filter(f=>!esLineaExcluida(f.linea)),fechas=src.fechasColumnas||[];
   if(!filasBase.length||!fechas.length){badges.innerHTML='';cards.innerHTML='';tabla.innerHTML='<div class="balance-visual-empty">El resumen aparecera cuando exista un balance calculado.</div>';renderizarGraficaHCActual({},[]);return;}
   const lineasMap=new Map();
-  filasBase.forEach(grupo=>{if(!lineasMap.has(grupo.linea))lineasMap.set(grupo.linea,{linea:grupo.linea,dias:{},operaciones:new Map(),total:0,promedio:0});const row=lineasMap.get(grupo.linea);fechas.forEach(iso=>{const dia=grupo.dias?.[iso];if(!dia)return;let hcDia=0;(dia.detalleOperaciones||[]).forEach(det=>{const opReal=String(det.operacion||det.etapa||'SIN OPERACION').trim()||'SIN OPERACION',act=operacionActivaEnLinea(grupo.linea,opReal),hc=act?Number(det.hc||0):0;hcDia+=hc;const key=norm(opReal);if(!row.operaciones.has(key))row.operaciones.set(key,{operacion:opReal,dias:{},total:0});const op=row.operaciones.get(key);op.dias[iso]=(op.dias[iso]||0)+hc;op.total+=hc;});row.dias[iso]=(row.dias[iso]||0)+hcDia;row.total+=hcDia;});});
+  filasPorModulo(filasBase).forEach(grupo=>{if(!lineasMap.has(grupo.linea))lineasMap.set(grupo.linea,{linea:grupo.linea,dias:{},operaciones:new Map(),total:0,promedio:0});const row=lineasMap.get(grupo.linea);fechas.forEach(iso=>{const dia=grupo.dias?.[iso];if(!dia)return;let hcDia=0;(dia.detalleOperaciones||[]).forEach(det=>{const opReal=String(det.operacion||det.etapa||'SIN OPERACION').trim()||'SIN OPERACION',act=operacionActivaEnLinea(grupo.linea,opReal),hc=act?Number(det.hc||0):0;hcDia+=hc;const key=norm(opReal);if(!row.operaciones.has(key))row.operaciones.set(key,{operacion:opReal,dias:{},total:0});const op=row.operaciones.get(key);op.dias[iso]=(op.dias[iso]||0)+hc;op.total+=hc;});row.dias[iso]=(row.dias[iso]||0)+hcDia;row.total+=hcDia;});});
   const lineas=[...lineasMap.values()].map(r=>({...r,promedio:r.total/Math.max(fechas.length,1),operaciones:[...r.operaciones.values()].map(o=>({...o,promedio:o.total/Math.max(fechas.length,1)})).sort((a,b)=>b.total-a.total||a.operacion.localeCompare(b.operacion,'es'))})).filter(r=>r.operaciones.length||r.total>0).sort((a,b)=>b.promedio-a.promedio||a.linea.localeCompare(b.linea,'es'));
   const flashRow=lineas.find(r=>cortePlanoMODLineaEsFlashCut(r.linea));
   const fijosPorSemana={}; fechas.forEach(iso=>fijosPorSemana[iso]=flashRow ? cortePlanoMODFijosSemana(iso).total : 0);
@@ -9303,7 +9330,7 @@ renderizarResumenVisualBalance = function() {
   badges.innerHTML=`<span class="balance-visual-badge">Fuente <strong>${fuenteActiva==='proyeccion'?'Proyeccion':'Programa'}</strong></span><span class="balance-visual-badge">Lineas <strong>${lineas.length}</strong></span><span class="balance-visual-badge">HC optimo prom. <strong>${optProm.toFixed(1)}</strong></span>`;
   cards.innerHTML=`<div class="balance-visual-card"><span>Mayor carga semanal</span><strong>${Number(totalPorSemana[isoMayor]||0).toFixed(1)}</strong><em>${nombreEncabezadoDia(isoMayor)}</em></div><mod-eficiencia-actual class="balance-visual-card"></mod-eficiencia-actual><div class="balance-visual-card"><span>Linea critica</span><strong>${Number(lineaMayor.promedio||0).toFixed(1)}</strong><em>${esc(lineaMayor.linea||'—')}</em></div><div class="balance-visual-card"><span>HC optimo promedio</span><strong>${optProm.toFixed(1)}</strong><em>Editable por semana</em></div><div class="balance-visual-card"><span>Semanas evaluadas</span><strong>${fechas.length}</strong><em>${nombreEncabezadoDia(fechas[0])} → ${nombreEncabezadoDia(fechas[fechas.length-1])}</em></div>`;
   const th=fechas.map(i=>`<th>${nombreEncabezadoDia(i)}</th>`).join('');
-  const rows=lineas.map((r,idx)=>{const id=`cpmod-${idx}`,lk=normLinea(r.linea||''),exp=LINEAS_EXPANDIDAS_RESUMEN.has(lk),dias=fechas.map(i=>{const v=r.dias[i]||0,sc=Math.max(.06,Math.min(1,v/maxCelda));return `<td class="balance-visual-cell">${v>0?v.toFixed(2):'—'}${v>0?`<span class="hc-bar" style="transform:scaleX(${sc})"></span>`:''}</td>`}).join('');const main=`<tr class="balance-visual-line-row ${exp?'':'collapsed'}" data-linea-id="${id}" data-linea-key="${esc(lk)}"><td><div class="balance-visual-line-main"><button class="balance-visual-line-toggle" type="button">${exp?'−':'+'}</button><span class="balance-visual-linea"><span class="balance-visual-dot"></span><span class="balance-visual-line-name">${esc(r.linea)}${cortePlanoMODLineaEsFlashCut(r.linea) ? ' · 12 h/día · 60 h/semana' : ''}</span></span></div></td>${dias}<td class="balance-visual-total-col">${r.promedio.toFixed(2)}</td></tr>`;const fijas=(r.fijas||[]).map(pos=>{const ods=fechas.map(i=>`<td class="balance-visual-cell"><input class="flash-fixed-input" type="number" min="0" step="1" data-iso="${esc(i)}" data-fixed-key="${esc(pos.key)}" value="${Number(pos.dias[i]||0).toFixed(0)}" title="HC fijo editable para ${nombreEncabezadoDia(i)}"></td>`).join('');const promF=fechas.reduce((s,i)=>s+Number(pos.dias[i]||0),0)/Math.max(fechas.length,1);return `<tr class="balance-visual-op-row balance-visual-fixed-row ${exp?'':'hidden'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><span class="balance-visual-fixed-pill">FIJO</span><span>${esc(pos.nombre)}</span></span></td>${ods}<td class="balance-visual-total-col">${promF.toFixed(1)}</td></tr>`}).join('');const ops=r.operaciones.map(op=>{const act=operacionActivaEnLinea(r.linea,op.operacion),ods=fechas.map(i=>`<td class="balance-visual-cell">${(op.dias[i]||0)>0?(op.dias[i]||0).toFixed(2):'—'}</td>`).join('');return `<tr class="balance-visual-op-row ${exp?'':'hidden'} ${act?'':'op-desactivada'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><input class="balance-visual-op-check" type="checkbox" data-linea="${esc(r.linea)}" data-operacion="${esc(op.operacion)}" ${act?'checked':''}><span class="balance-visual-op-pill">OP</span><span>${esc(op.operacion)}</span></span></td>${ods}<td class="balance-visual-total-col">${op.promedio.toFixed(2)}</td></tr>`}).join('');return main+fijas+ops;}).join('');
+  const rows=lineas.map((r,idx)=>{const id=`cpmod-${idx}`,lk=normLinea(r.linea||''),exp=LINEAS_EXPANDIDAS_RESUMEN.has(lk),dias=fechas.map(i=>{const v=r.dias[i]||0,sc=Math.max(.06,Math.min(1,v/maxCelda));return `<td class="balance-visual-cell">${v>0?v.toFixed(2):'—'}${v>0?`<span class="hc-bar" style="transform:scaleX(${sc})"></span>`:''}</td>`}).join('');const main=`<tr class="balance-visual-line-row ${exp?'':'collapsed'}" data-linea-id="${id}" data-linea-key="${esc(lk)}"><td><div class="balance-visual-line-main"><button class="balance-visual-line-toggle" type="button">${exp?'−':'+'}</button><span class="balance-visual-linea"><span class="balance-visual-dot"></span><span class="balance-visual-line-name">${esc(r.linea)}${cortePlanoMODLineaEsFlashCut(r.linea) ? ' · 12 h/día · 60 h/semana' : r.linea === MODULO_DESVIRADO ? ' · L–J 9 h · V 8 h · 44 h/semana' : ''}</span></span></div></td>${dias}<td class="balance-visual-total-col">${r.promedio.toFixed(2)}</td></tr>`;const fijas=(r.fijas||[]).map(pos=>{const ods=fechas.map(i=>`<td class="balance-visual-cell"><input class="flash-fixed-input" type="number" min="0" step="1" data-iso="${esc(i)}" data-fixed-key="${esc(pos.key)}" value="${Number(pos.dias[i]||0).toFixed(0)}" title="HC fijo editable para ${nombreEncabezadoDia(i)}"></td>`).join('');const promF=fechas.reduce((s,i)=>s+Number(pos.dias[i]||0),0)/Math.max(fechas.length,1);return `<tr class="balance-visual-op-row balance-visual-fixed-row ${exp?'':'hidden'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><span class="balance-visual-fixed-pill">FIJO</span><span>${esc(pos.nombre)}</span></span></td>${ods}<td class="balance-visual-total-col">${promF.toFixed(1)}</td></tr>`}).join('');const ops=r.operaciones.map(op=>{const act=operacionActivaEnLinea(r.linea,op.operacion),ods=fechas.map(i=>`<td class="balance-visual-cell">${(op.dias[i]||0)>0?(op.dias[i]||0).toFixed(2):'—'}</td>`).join('');return `<tr class="balance-visual-op-row ${exp?'':'hidden'} ${act?'':'op-desactivada'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><input class="balance-visual-op-check" type="checkbox" data-linea="${esc(r.linea)}" data-operacion="${esc(op.operacion)}" ${act?'checked':''}><span class="balance-visual-op-pill">OP</span><span>${esc(op.operacion)}</span></span></td>${ods}<td class="balance-visual-total-col">${op.promedio.toFixed(2)}</td></tr>`}).join('');return main+fijas+ops;}).join('');
   const totalRow=fechas.map(i=>`<td>${totalPorSemana[i]>0?totalPorSemana[i].toFixed(2):'—'}</td>`).join('');
   const optRow=fechas.map(i=>`<td><input class="mod8-opt-input" type="number" min="0" step="1" data-iso="${esc(i)}" value="${Number(hcOpt[i]||0).toFixed(0)}"></td>`).join('');
   const horasCapacidad = {};
