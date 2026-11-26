@@ -5289,7 +5289,7 @@ window.addEventListener('focus', revisarActualizacionRutasAutomatica);
    PASO 3: CRUZAR DATOS
    ──────────────────────────────────────────────────────────── */
 function crearRegistroSinRuta(reg, motivo) {
-  const horas = horasPorFecha(reg.fecha);
+  const horas = horasPorFecha(reg.fecha, reg.linea);
   return {
     fecha:           reg.fecha,
     linea:           reg.linea,
@@ -5340,7 +5340,7 @@ function cruzarDatos() {
         tuvoOperacionConEficiencia = true;
         hitEf++;
 
-        const horas = horasPorFecha(reg.fecha);
+        const horas = horasPorFecha(reg.fecha, reg.linea);
         if (horas === 0) return; // domingo: se mostrará como HC 0 si no queda operación útil
 
         const hc = calcularHC(samInfo.sam, reg.unidades, horas, eficiencia);
@@ -5434,7 +5434,7 @@ function cruzarDatosProyeccion() {
         if (typeof operacionActivaEnLinea === 'function' && !operacionActivaEnLinea(reg.linea, opSam)) return;
         const eficiencia = eficienciaDe(opSam, samInfo.etapa);
         tuvoOperacionConEficiencia = true;
-        const horas = horasPorFecha(reg.fecha);
+        const horas = horasPorFecha(reg.fecha, reg.linea);
         if (horas === 0) return;
         const hc = calcularHC(samInfo.sam, reg.unidades, horas, eficiencia);
         resultado.push({
@@ -5987,8 +5987,7 @@ function renderizarTarjetas() {
       // Para el resumen global usamos 44h: recalcular solo si no hay fecha
       const ef  = r.eficiencia / 100;
       const sam = r.sam;
-      const hc44 = (ef > 0) ? (sam * r.unidades) / (44 * 60 * ef) : 0;
-      hcTotal += hc44;
+      hcTotal += calcularHC(sam, r.unidades, horasPorFecha(r.fecha, r.linea), ef);
     });
   } else {
     hcTotal = datos.reduce((s, r) => s + r.hc, 0);
@@ -7404,7 +7403,7 @@ function recalcularConNuevasHoras() {
   const src = getEstadoActivo();
   if (!src.datosFinales || !src.datosFinales.length) return;
   src.datosFinales.forEach(r => {
-    const horas = horasPorFecha(r.fecha);
+    const horas = horasPorFecha(r.fecha, r.linea);
     r.horas = horas;
     r.hc    = calcularHC(r.sam, r.unidades, horas, r.eficiencia / 100);
   });
@@ -8526,8 +8525,24 @@ let CORTEPLANOMOD_FLASH_FIXED = (() => {
   catch (_) { return {}; }
 })();
 function cortePlanoMODLineaEsFlashCut(linea) {
-  return normLinea(String(linea || '')).includes('FLASH CUT');
+  return /FLASH[\s_-]*CUT/.test(normLinea(String(linea || '')));
 }
+const FLASHCUT_HORAS_SEMANA = 12 * 5;
+
+function horasVariablesCorte(sem) {
+  const filas = getEstadoActivo()?.resumenFilas || [];
+  const iso = (getEstadoActivo()?.fechasColumnas || []).find(i => mod8SemanaDesdeIso(i) === sem) || mod8IsoSemana(sem);
+  let hcTotal = 0, horasTotal = 0;
+  for (const fila of filas) {
+    if (esLineaExcluida(fila.linea)) continue;
+    const operaciones = fila.dias?.[iso]?.detalleOperaciones || [];
+    const hc = operaciones.reduce((total, op) => total + (operacionActivaEnLinea(fila.linea, op.operacion) ? Number(op.hc || 0) : 0), 0);
+    hcTotal += hc;
+    horasTotal += hc * horasPorFecha(iso, fila.linea);
+  }
+  return hcTotal > 0 ? horasTotal / hcTotal : mod8Horas(sem);
+}
+
 function cortePlanoMODFijoValor(iso, key) {
   const raw = CORTEPLANOMOD_FLASH_FIXED?.[String(iso)]?.[key];
   const v = Number(raw);
@@ -8544,17 +8559,17 @@ function cortePlanoMODSetFijo(iso, key, valor) {
   CORTEPLANOMOD_FLASH_FIXED[k][key] = v;
   localStorage.setItem(CORTEPLANOMOD_FLASH_FIXED_KEY, JSON.stringify(CORTEPLANOMOD_FLASH_FIXED));
 }
-function cortePlanoMODAgregarFijosAOptimo(optimoBase, fechas) {
+function cortePlanoMODAgregarFijosAOptimo(optimoBase, fechas, fijosPorSemana) {
   const base = optimoBase || { porSemana:{}, detalle:[] };
   const porSemana = {};
   const detalle = (fechas || []).map(iso => {
-    const fijos = cortePlanoMODFijosSemana(iso).total;
+    const fijos = fijosPorSemana[iso] || 0;
     const d = (base.detalle || []).find(x => x.iso === iso) || {};
     const hcVariable = Number(base.porSemana?.[iso] || d.hc || 0);
     const hc = hcVariable + fijos;
-    const h = Number(mod8Horas(mod8SemanaDesdeIso(iso)) || 44);
+    const h = Number(d.horas || mod8Horas(mod8SemanaDesdeIso(iso)));
     porSemana[iso] = hc;
-    return { ...d, iso, fecha:mod8SemanaDesdeIso(iso), hcVariable, hcFijo:fijos, hc, costo:(hc*h*Number(mod8Parametros?.costoHoraOrdinaria||3.47)) + Number(d.he||0)*Math.max(0,Number(mod8Parametros?.costoHoraExtra||4.17)-Number(mod8Parametros?.costoHoraOrdinaria||3.47)) };
+    return { ...d, iso, fecha:mod8SemanaDesdeIso(iso), hcVariable, hcFijo:fijos, hc, costo:((hcVariable*h + fijos*FLASHCUT_HORAS_SEMANA)*Number(mod8Parametros?.costoHoraOrdinaria||3.47)) + Number(d.he||0)*Math.max(0,Number(mod8Parametros?.costoHoraExtra||4.17)-Number(mod8Parametros?.costoHoraOrdinaria||3.47)) };
   });
   return { ...base, porSemana, detalle, promedio:detalle.reduce((s,d)=>s+Number(d.hc||0),0)/Math.max(detalle.length,1), costoTotal:detalle.reduce((s,d)=>s+Number(d.costo||0),0) };
 }
@@ -8644,7 +8659,8 @@ nombreDiaDesdeFecha = function(valor) {
   const sem = mod8SemanaDesdeIso(valor);
   return sem ? `SEMANA ${sem}` : '';
 };
-horasPorFecha = function(valor) {
+horasPorFecha = function(valor, linea) {
+  if (cortePlanoMODLineaEsFlashCut(linea)) return FLASHCUT_HORAS_SEMANA;
   const sem = mod8SemanaDesdeIso(valor);
   return sem ? mod8Horas(sem) : 44;
 };
@@ -8837,7 +8853,8 @@ function calcularHCOptimoSerieMOD(totalPorSemana, fechas, hcActualInicial = 0) {
   const costoOrd = Number(mod8Parametros.costoHoraOrdinaria || 3.47);
   const costoExt = Number(mod8Parametros.costoHoraExtra || 4.17);
 
-  function horas(sem) { return Number(mod8Horas(sem) || 44); }
+  const jornada = new Map(weeks.map(w => [w.sem, horasVariablesCorte(w.sem)]));
+  function horas(sem) { return jornada.get(sem); }
   function reqEntero(req) { return req > 0 ? Math.ceil(req - 1e-9) : 0; }
   function minHard(req, sem) {
     const h = horas(sem);
@@ -9085,7 +9102,7 @@ function mod8RecalcularConHoras() {
   [estado, estadoProyeccion].forEach(src => {
     if (!src || !src.datosFinales) return;
     src.datosFinales.forEach(r => {
-      const horas = horasPorFecha(r.fecha);
+      const horas = horasPorFecha(r.fecha, r.linea);
       r.horas = horas;
       r.hc = calcularHC(r.sam, r.unidades, horas, r.eficiencia / 100);
     });
@@ -9133,8 +9150,8 @@ renderizarGraficaHCActual = function(totalPorDia = null, fechas = null) {
   }
   const totalSemana = {}; fechasBase.forEach(iso => totalSemana[iso] = Number(totalPorDia?.[iso] ?? desglose[iso]?.total ?? 0));
   const fijosChart = {}; const demandaVariableChart = {};
-  fechasBase.forEach(iso => { fijosChart[iso] = cortePlanoMODFijosSemana(iso).total; demandaVariableChart[iso] = Math.max(0, Number(totalSemana[iso]||0) - Number(fijosChart[iso]||0)); });
-  const optimo = cortePlanoMODAgregarFijosAOptimo(calcularHCOptimoMOD(demandaVariableChart, fechasBase, null), fechasBase);
+  fechasBase.forEach(iso => { fijosChart[iso] = (src?.resumenFilas || []).some(f => cortePlanoMODLineaEsFlashCut(f.linea)) ? cortePlanoMODFijosSemana(iso).total : 0; demandaVariableChart[iso] = Math.max(0, Number(totalSemana[iso]||0) - Number(fijosChart[iso]||0)); });
+  const optimo = cortePlanoMODAgregarFijosAOptimo(calcularHCOptimoMOD(demandaVariableChart, fechasBase, null), fechasBase, fijosChart);
   mod8UltimoOptimo = optimo;
   const valores = fechasBase.map(iso => Number(totalSemana[iso] || 0));
   const optVals = fechasBase.map(iso => Number(optimo.porSemana[iso] || 0));
@@ -9267,7 +9284,7 @@ renderizarResumenVisualBalance = function() {
   filasBase.forEach(grupo=>{if(!lineasMap.has(grupo.linea))lineasMap.set(grupo.linea,{linea:grupo.linea,dias:{},operaciones:new Map(),total:0,promedio:0});const row=lineasMap.get(grupo.linea);fechas.forEach(iso=>{const dia=grupo.dias?.[iso];if(!dia)return;let hcDia=0;(dia.detalleOperaciones||[]).forEach(det=>{const opReal=String(det.operacion||det.etapa||'SIN OPERACION').trim()||'SIN OPERACION',act=operacionActivaEnLinea(grupo.linea,opReal),hc=act?Number(det.hc||0):0;hcDia+=hc;const key=norm(opReal);if(!row.operaciones.has(key))row.operaciones.set(key,{operacion:opReal,dias:{},total:0});const op=row.operaciones.get(key);op.dias[iso]=(op.dias[iso]||0)+hc;op.total+=hc;});row.dias[iso]=(row.dias[iso]||0)+hcDia;row.total+=hcDia;});});
   const lineas=[...lineasMap.values()].map(r=>({...r,promedio:r.total/Math.max(fechas.length,1),operaciones:[...r.operaciones.values()].map(o=>({...o,promedio:o.total/Math.max(fechas.length,1)})).sort((a,b)=>b.total-a.total||a.operacion.localeCompare(b.operacion,'es'))})).filter(r=>r.operaciones.length||r.total>0).sort((a,b)=>b.promedio-a.promedio||a.linea.localeCompare(b.linea,'es'));
   const flashRow=lineas.find(r=>cortePlanoMODLineaEsFlashCut(r.linea));
-  const fijosPorSemana={}; fechas.forEach(iso=>fijosPorSemana[iso]=cortePlanoMODFijosSemana(iso).total);
+  const fijosPorSemana={}; fechas.forEach(iso=>fijosPorSemana[iso]=flashRow ? cortePlanoMODFijosSemana(iso).total : 0);
   if(flashRow){
     flashRow.fijas=CORTEPLANOMOD_FLASH_FIXED_DEF.map(def=>({ ...def, dias:Object.fromEntries(fechas.map(iso=>[iso,cortePlanoMODFijoValor(iso,def.key)])) }));
     fechas.forEach(iso=>{flashRow.dias[iso]=(flashRow.dias[iso]||0)+Number(fijosPorSemana[iso]||0);});
@@ -9279,19 +9296,25 @@ renderizarResumenVisualBalance = function() {
   filasBase.forEach(g=>fechas.forEach(iso=>{const d=g.dias?.[iso];if(!d)return;const u=Number(d.unidades||0);if(!(u>0))return;const sam=(d.detalleOperaciones||[]).filter(op=>operacionActivaEnLinea(g.linea,op.operacion)).reduce((s,op)=>s+Number(op.sam||op._samRaw||0),0);samNumerador[iso]+=sam*u;unidades[iso]+=u;}));
   const demandaVariable={};fechas.forEach(iso=>demandaVariable[iso]=Math.max(0,Number(totalPorSemana[iso]||0)-Number(fijosPorSemana[iso]||0)));
   const algoritmoBase=typeof calcularHCOptimoMOD==='function'?calcularHCOptimoMOD(demandaVariable,fechas,null):{porSemana:{},promedio:0,detalle:[]};
-  const algoritmo=cortePlanoMODAgregarFijosAOptimo(algoritmoBase,fechas);const hcOpt={};fechas.forEach(iso=>hcOpt[iso]=cortePlanoMODOptimo(iso,algoritmo.porSemana?.[iso]));const optProm=fechas.reduce((s,i)=>s+Number(hcOpt[i]||0),0)/Math.max(fechas.length,1);if(typeof mod8UltimoOptimo!=='undefined')mod8UltimoOptimo={...algoritmo,porSemana:hcOpt,promedio:optProm};
+  const algoritmo=cortePlanoMODAgregarFijosAOptimo(algoritmoBase,fechas,fijosPorSemana);const hcOpt={};fechas.forEach(iso=>hcOpt[iso]=cortePlanoMODOptimo(iso,algoritmo.porSemana?.[iso]));const optProm=fechas.reduce((s,i)=>s+Number(hcOpt[i]||0),0)/Math.max(fechas.length,1);if(typeof mod8UltimoOptimo!=='undefined')mod8UltimoOptimo={...algoritmo,porSemana:hcOpt,promedio:optProm};
   renderizarGraficaHCActual(totalPorSemana,fechas);
   const totalGeneral=fechas.reduce((s,i)=>s+totalPorSemana[i],0),prom=totalGeneral/Math.max(fechas.length,1),isoMayor=fechas.reduce((b,i)=>totalPorSemana[i]>(totalPorSemana[b]||0)?i:b,fechas[0]),lineaMayor=lineas[0]||{promedio:0,linea:'—'},maxCelda=Math.max(...lineas.flatMap(r=>fechas.map(i=>r.dias[i]||0)),1);
   if(sub)sub.textContent=`${nombreEncabezadoDia(fechas[0])} a ${nombreEncabezadoDia(fechas[fechas.length-1])} · operaciones marcables por linea`;
   badges.innerHTML=`<span class="balance-visual-badge">Fuente <strong>${fuenteActiva==='proyeccion'?'Proyeccion':'Programa'}</strong></span><span class="balance-visual-badge">Lineas <strong>${lineas.length}</strong></span><span class="balance-visual-badge">HC optimo prom. <strong>${optProm.toFixed(1)}</strong></span>`;
   cards.innerHTML=`<div class="balance-visual-card"><span>Mayor carga semanal</span><strong>${Number(totalPorSemana[isoMayor]||0).toFixed(1)}</strong><em>${nombreEncabezadoDia(isoMayor)}</em></div><mod-eficiencia-actual class="balance-visual-card"></mod-eficiencia-actual><div class="balance-visual-card"><span>Linea critica</span><strong>${Number(lineaMayor.promedio||0).toFixed(1)}</strong><em>${esc(lineaMayor.linea||'—')}</em></div><div class="balance-visual-card"><span>HC optimo promedio</span><strong>${optProm.toFixed(1)}</strong><em>Editable por semana</em></div><div class="balance-visual-card"><span>Semanas evaluadas</span><strong>${fechas.length}</strong><em>${nombreEncabezadoDia(fechas[0])} → ${nombreEncabezadoDia(fechas[fechas.length-1])}</em></div>`;
   const th=fechas.map(i=>`<th>${nombreEncabezadoDia(i)}</th>`).join('');
-  const rows=lineas.map((r,idx)=>{const id=`cpmod-${idx}`,lk=normLinea(r.linea||''),exp=LINEAS_EXPANDIDAS_RESUMEN.has(lk),dias=fechas.map(i=>{const v=r.dias[i]||0,sc=Math.max(.06,Math.min(1,v/maxCelda));return `<td class="balance-visual-cell">${v>0?v.toFixed(2):'—'}${v>0?`<span class="hc-bar" style="transform:scaleX(${sc})"></span>`:''}</td>`}).join('');const main=`<tr class="balance-visual-line-row ${exp?'':'collapsed'}" data-linea-id="${id}" data-linea-key="${esc(lk)}"><td><div class="balance-visual-line-main"><button class="balance-visual-line-toggle" type="button">${exp?'−':'+'}</button><span class="balance-visual-linea"><span class="balance-visual-dot"></span><span class="balance-visual-line-name">${esc(r.linea)}</span></span></div></td>${dias}<td class="balance-visual-total-col">${r.promedio.toFixed(2)}</td></tr>`;const fijas=(r.fijas||[]).map(pos=>{const ods=fechas.map(i=>`<td class="balance-visual-cell"><input class="flash-fixed-input" type="number" min="0" step="1" data-iso="${esc(i)}" data-fixed-key="${esc(pos.key)}" value="${Number(pos.dias[i]||0).toFixed(0)}" title="HC fijo editable para ${nombreEncabezadoDia(i)}"></td>`).join('');const promF=fechas.reduce((s,i)=>s+Number(pos.dias[i]||0),0)/Math.max(fechas.length,1);return `<tr class="balance-visual-op-row balance-visual-fixed-row ${exp?'':'hidden'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><span class="balance-visual-fixed-pill">FIJO</span><span>${esc(pos.nombre)}</span></span></td>${ods}<td class="balance-visual-total-col">${promF.toFixed(1)}</td></tr>`}).join('');const ops=r.operaciones.map(op=>{const act=operacionActivaEnLinea(r.linea,op.operacion),ods=fechas.map(i=>`<td class="balance-visual-cell">${(op.dias[i]||0)>0?(op.dias[i]||0).toFixed(2):'—'}</td>`).join('');return `<tr class="balance-visual-op-row ${exp?'':'hidden'} ${act?'':'op-desactivada'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><input class="balance-visual-op-check" type="checkbox" data-linea="${esc(r.linea)}" data-operacion="${esc(op.operacion)}" ${act?'checked':''}><span class="balance-visual-op-pill">OP</span><span>${esc(op.operacion)}</span></span></td>${ods}<td class="balance-visual-total-col">${op.promedio.toFixed(2)}</td></tr>`}).join('');return main+fijas+ops;}).join('');
+  const rows=lineas.map((r,idx)=>{const id=`cpmod-${idx}`,lk=normLinea(r.linea||''),exp=LINEAS_EXPANDIDAS_RESUMEN.has(lk),dias=fechas.map(i=>{const v=r.dias[i]||0,sc=Math.max(.06,Math.min(1,v/maxCelda));return `<td class="balance-visual-cell">${v>0?v.toFixed(2):'—'}${v>0?`<span class="hc-bar" style="transform:scaleX(${sc})"></span>`:''}</td>`}).join('');const main=`<tr class="balance-visual-line-row ${exp?'':'collapsed'}" data-linea-id="${id}" data-linea-key="${esc(lk)}"><td><div class="balance-visual-line-main"><button class="balance-visual-line-toggle" type="button">${exp?'−':'+'}</button><span class="balance-visual-linea"><span class="balance-visual-dot"></span><span class="balance-visual-line-name">${esc(r.linea)}${cortePlanoMODLineaEsFlashCut(r.linea) ? ' · 12 h/día · 60 h/semana' : ''}</span></span></div></td>${dias}<td class="balance-visual-total-col">${r.promedio.toFixed(2)}</td></tr>`;const fijas=(r.fijas||[]).map(pos=>{const ods=fechas.map(i=>`<td class="balance-visual-cell"><input class="flash-fixed-input" type="number" min="0" step="1" data-iso="${esc(i)}" data-fixed-key="${esc(pos.key)}" value="${Number(pos.dias[i]||0).toFixed(0)}" title="HC fijo editable para ${nombreEncabezadoDia(i)}"></td>`).join('');const promF=fechas.reduce((s,i)=>s+Number(pos.dias[i]||0),0)/Math.max(fechas.length,1);return `<tr class="balance-visual-op-row balance-visual-fixed-row ${exp?'':'hidden'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><span class="balance-visual-fixed-pill">FIJO</span><span>${esc(pos.nombre)}</span></span></td>${ods}<td class="balance-visual-total-col">${promF.toFixed(1)}</td></tr>`}).join('');const ops=r.operaciones.map(op=>{const act=operacionActivaEnLinea(r.linea,op.operacion),ods=fechas.map(i=>`<td class="balance-visual-cell">${(op.dias[i]||0)>0?(op.dias[i]||0).toFixed(2):'—'}</td>`).join('');return `<tr class="balance-visual-op-row ${exp?'':'hidden'} ${act?'':'op-desactivada'}" data-parent-linea="${id}"><td><span class="balance-visual-op-name"><input class="balance-visual-op-check" type="checkbox" data-linea="${esc(r.linea)}" data-operacion="${esc(op.operacion)}" ${act?'checked':''}><span class="balance-visual-op-pill">OP</span><span>${esc(op.operacion)}</span></span></td>${ods}<td class="balance-visual-total-col">${op.promedio.toFixed(2)}</td></tr>`}).join('');return main+fijas+ops;}).join('');
   const totalRow=fechas.map(i=>`<td>${totalPorSemana[i]>0?totalPorSemana[i].toFixed(2):'—'}</td>`).join('');
   const optRow=fechas.map(i=>`<td><input class="mod8-opt-input" type="number" min="0" step="1" data-iso="${esc(i)}" value="${Number(hcOpt[i]||0).toFixed(0)}"></td>`).join('');
-  const eff={};fechas.forEach(i=>{const h=Number(mod8Horas(mod8SemanaDesdeIso(i))||44),den=h*60*Number(hcOpt[i]||0);eff[i]=den>0?Number(samNumerador[i]||0)/den:0;});const effRow=fechas.map(i=>`<td>${eff[i]>0?(eff[i]*100).toFixed(1)+'%':'—'}</td>`).join('');const effProm=fechas.reduce((num,i)=>num+Number(samNumerador[i]||0),0)/Math.max(fechas.reduce((den,i)=>den+Number(mod8Horas(mod8SemanaDesdeIso(i))||44)*60*Number(hcOpt[i]||0),0),1);
+  const horasCapacidad = {};
+  for (const iso of fechas) {
+    const hc = hcOpt[iso];
+    const fijo = Math.min(hc, Number(fijosPorSemana[iso] || 0));
+    horasCapacidad[iso] = fijo * FLASHCUT_HORAS_SEMANA + (hc - fijo) * horasVariablesCorte(mod8SemanaDesdeIso(iso));
+  }
+  const eff={};fechas.forEach(i=>{const den=horasCapacidad[i]*60;eff[i]=den>0?Number(samNumerador[i]||0)/den:0;});const effRow=fechas.map(i=>`<td>${eff[i]>0?(eff[i]*100).toFixed(1)+'%':'—'}</td>`).join('');const effProm=fechas.reduce((num,i)=>num+Number(samNumerador[i]||0),0)/Math.max(fechas.reduce((den,i)=>den+horasCapacidad[i]*60,0),1);
   const unRow=fechas.map(i=>`<td>${unidades[i]>0?Math.round(unidades[i]).toLocaleString('en-US'):'—'}</td>`).join('');const unTot=fechas.reduce((s,i)=>s+unidades[i],0),unProm=unTot/Math.max(fechas.length,1),samRow=fechas.map(i=>`<td>${unidades[i]>0?(samNumerador[i]/unidades[i]).toFixed(2):'—'}</td>`).join(''),samTot=fechas.reduce((s,i)=>s+samNumerador[i],0)/Math.max(unTot,1);
-  const costHour=Number(mod8Parametros?.costoHoraOrdinaria||3.47);const costRow=fechas.map(i=>{const h=Number(mod8Horas(mod8SemanaDesdeIso(i))||44),u=Number(unidades[i]||0),c=Number(hcOpt[i]||0)*h*costHour;return `<td>${u>0?'$'+(c/u).toFixed(4):'—'}</td>`}).join('');const costTot=fechas.reduce((s,i)=>s+Number(hcOpt[i]||0)*Number(mod8Horas(mod8SemanaDesdeIso(i))||44)*costHour,0)/Math.max(unTot,1);
+  const costHour=Number(mod8Parametros?.costoHoraOrdinaria||3.47);const costRow=fechas.map(i=>{const u=Number(unidades[i]||0),c=horasCapacidad[i]*costHour;return `<td>${u>0?'$'+(c/u).toFixed(4):'—'}</td>`}).join('');const costTot=fechas.reduce((s,i)=>s+horasCapacidad[i]*costHour,0)/Math.max(unTot,1);
   tabla.innerHTML=`<table class="balance-visual-table"><thead><tr><th>Linea / operacion</th>${th}<th>Prom. 8 sem.</th></tr></thead><tbody>${rows}<tr class="balance-visual-total-row"><th>TOTAL HC / SEMANA</th>${totalRow}<td>${prom.toFixed(2)}</td></tr><tr class="balance-visual-optimo-row"><th>HC OPTIMO</th>${optRow}<td>${optProm.toFixed(1)}</td></tr><tr class="balance-visual-eff-row"><th>EFICIENCIA PROYECTADA</th>${effRow}<td>${effProm>0?(effProm*100).toFixed(1)+'%':'—'}</td></tr><tr class="balance-visual-unidades-row"><th>TOTAL UNIDADES</th>${unRow}<td>${unProm>0?Math.round(unProm).toLocaleString('en-US'):'—'}</td></tr><tr class="balance-visual-cost-unit-row"><th>COSTO UNIT. CORTE PLANO</th>${costRow}<td>${costTot>0?'$'+costTot.toFixed(4):'—'}</td></tr><tr class="balance-visual-sam-row"><th>SAM PONDERADO</th>${samRow}<td>${samTot>0?samTot.toFixed(2):'—'}</td></tr></tbody></table>`;
   document.querySelectorAll('.balance-visual-line-row').forEach(row=>{const btn=row.querySelector('.balance-visual-line-toggle');row.addEventListener('click',ev=>{if(ev.target.closest('.balance-visual-op-check'))return;const id=row.dataset.lineaId,key=row.dataset.lineaKey,open=row.classList.contains('collapsed');row.classList.toggle('collapsed',!open);if(open)LINEAS_EXPANDIDAS_RESUMEN.add(key);else LINEAS_EXPANDIDAS_RESUMEN.delete(key);document.querySelectorAll(`.balance-visual-op-row[data-parent-linea="${id}"]`).forEach(or=>or.classList.toggle('hidden',!open));if(btn)btn.textContent=open?'−':'+';});});
 };
